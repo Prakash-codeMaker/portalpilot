@@ -1,0 +1,8 @@
+PORTALPILOT-DOCUMENT
+type: FIRE_SAFETY_CERTIFICATE
+entity: Apex Manufacturing
+site: Pune Plant
+certificate: FS-11092
+issued: 2025-09-01
+expires: 2026-08-30
+quote: This certificate is valid until 30 August 2026.

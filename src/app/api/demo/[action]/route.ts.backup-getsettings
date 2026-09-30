@@ -1,0 +1,94 @@
+import { jsonHandler, readJson } from "@/lib/api";
+import {
+  changeDeadline,
+  ensureSeeded,
+  raiseClarification,
+  replaceCertificate,
+  seedDemo,
+  setFalseSuccess,
+} from "@/db/repository";
+import { PRIMARY_APPLICATION_ID, PortalPilotError } from "@/lib/core";
+import { queueCheck, submitRun, decideApproval, waitForRun } from "@/workflow/engine";
+import { db } from "@/db";
+import { portalApplications } from "@/db/schema";
+import { eq } from "drizzle-orm";
+import { FIRE_CERTIFICATE_OLD } from "@/demo/documents";
+import { addDocument } from "@/db/repository";
+
+export const dynamic = "force-dynamic";
+
+export async function POST(request: Request, ctx: { params: Promise<{ action: string }> }) {
+  const { action } = await ctx.params;
+  const body = await readJson<{ applicationId?: string; deadline?: string }>(request);
+  const applicationId = body.applicationId ?? PRIMARY_APPLICATION_ID;
+
+  return jsonHandler(async () => {
+    if (action === "reset") {
+      await seedDemo(true);
+      return { ok: true, applicationId: PRIMARY_APPLICATION_ID, status: "UNDER_REVIEW" };
+    }
+    if (action === "raise-query") {
+      const result = await raiseClarification(applicationId);
+      return result;
+    }
+    if (action === "change-deadline") {
+      return changeDeadline(applicationId, body.deadline ?? "2026-10-10");
+    }
+    if (action === "false-success") {
+      return setFalseSuccess(applicationId);
+    }
+    if (action === "replace-certificate") {
+      const doc = await replaceCertificate(applicationId);
+      return { id: doc.id, name: doc.name, sha256: doc.sha256, expiresAt: doc.expiresAt };
+    }
+    if (action === "insert-expired") {
+      const doc = await addDocument(applicationId, FIRE_CERTIFICATE_OLD);
+      return { id: doc.id, name: doc.name, expiresAt: doc.expiresAt };
+    }
+    if (action === "submit") {
+      const [portal] = await db.select().from(portalApplications).where(eq(portalApplications.id, applicationId));
+      if (!portal) throw new PortalPilotError("PORTAL_UNAVAILABLE");
+      const queued = await queueCheck(applicationId);
+      await waitForRun(queued.runId);
+      return queued;
+    }
+    if (action === "guided") {
+      await seedDemo(true);
+      await raiseClarification(applicationId);
+      const queued = await queueCheck(applicationId);
+      const bundle = await waitForRun(queued.runId);
+      return {
+        runId: queued.runId,
+        phase: bundle?.run.phase,
+        resultStatus: bundle?.run.resultStatus,
+        stopped: "Waiting for document replacement and human approval.",
+      };
+    }
+    if (action === "approve-and-submit") {
+      const { runId } = await readJson<{ runId?: string }>(request).catch(() => ({ runId: undefined }));
+      if (!runId) throw new PortalPilotError("PORTAL_UNAVAILABLE", "runId required");
+      const settings = await getSettings();
+      await decideApproval(runId, "APPROVED", settings.operatorName);
+      return submitRun(runId, { actor: settings.operatorName });
+    }
+    throw new PortalPilotError("PORTAL_UNAVAILABLE", "Unknown demo action");
+  });
+}
+
+export async function GET() {
+  return jsonHandler(async () => {
+    await ensureSeeded();
+    return {
+      actions: [
+        "reset",
+        "raise-query",
+        "change-deadline",
+        "false-success",
+        "replace-certificate",
+        "insert-expired",
+        "submit",
+        "guided",
+      ],
+    };
+  });
+}
